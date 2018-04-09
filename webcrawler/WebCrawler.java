@@ -86,7 +86,7 @@ public class WebCrawler implements Crawler {
         } catch (MalformedURLException e) {
             e.printStackTrace();
         }
-        closeImpl();
+        closeImpl();//TODO: это нинадо
         return new Result(success, errors);
     }
 
