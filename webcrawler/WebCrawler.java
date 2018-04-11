@@ -1,44 +1,77 @@
 package ru.ifmo.rain.borisov.webcrawler;
 
 import info.kgeorgiy.java.advanced.crawler.*;
+
 import java.io.IOException;
 import java.net.MalformedURLException;
-import java.net.URL;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.*;
 
 public class WebCrawler implements Crawler {
-    static final int MAX_WAITER_COUNT = Integer.MAX_VALUE - 5;
-    ExecutorService downloadService, extractorService;
-    Downloader downloader;
-    int perHost = 20;
-    Semaphore waiter;
-    final List<String> success = Collections.synchronizedList(new LinkedList<String>());
-    final ConcurrentHashMap<String, IOException> errors = new ConcurrentHashMap<>();
-    final ConcurrentHashMap<String, Boolean> visited = new ConcurrentHashMap<>();
-    final ConcurrentHashMap<String, Semaphore> hostSemaphores = new ConcurrentHashMap<>();
+    private ExecutorService downloadService, extractorService;
+    private Downloader downloader;
+    private int perHost;
+    private final List<CountLatch> counters = new LinkedList<>();
+    private final ConcurrentHashMap<String, Semaphore> hostSemaphores = new ConcurrentHashMap<>();
+    private final Object lock = new Object();
+    private boolean isClosed = false;
+
+    private static void printUsage() {
+        System.err.println("USAGE: WebCrawler url [downloads [extractors [perHost]]]");
+    }
+
+    public static void main(String[] args) {
+        if (args == null || args.length == 0 || args.length > 4 || Arrays.stream(args).anyMatch(Objects::isNull)) {
+            printUsage();
+            return;
+        }
+        String url = args[0];
+        int downloaders = 5;
+        int extractors = 5;
+        int perHost = 5;
+        try {
+            if (args.length > 1) {
+                downloaders = Integer.parseInt(args[1]);
+            }
+            if (args.length > 2) {
+                extractors = Integer.parseInt(args[2]);
+            }
+            if (args.length > 3) {
+                perHost = Integer.parseInt(args[3]);
+            }
+        } catch (NumberFormatException e) {
+            System.err.println(e.getMessage());
+            printUsage();
+            return;
+        }
+        try (WebCrawler slark = new WebCrawler(new CachingDownloader(Paths.get(".", "WebCrawlerDownloads")), downloaders, extractors, perHost)) {
+            slark.download(url, 1);
+        } catch (IOException e) {
+            System.err.println(e.getMessage());
+        }
+    }
 
     public WebCrawler(Downloader downloader, int downloaders, int extractors, int perHost) {
         this.downloader = downloader;
         this.perHost = perHost;
         downloadService = Executors.newFixedThreadPool(downloaders);
         extractorService = Executors.newFixedThreadPool(extractors);
-        waiter = new Semaphore(MAX_WAITER_COUNT);
     }
 
-    public void downloadCommand(String what, int depth) {
+    private void downloadCommand(String what, int depth, CountLatch counter, List<String> success,
+                                 ConcurrentHashMap<String, IOException> errors, ConcurrentHashMap<String, Boolean> visited) {
         try {
-            if(!visited.containsKey(what)) {
-                visited.put(what, Boolean.TRUE);
+            if (visited.putIfAbsent(what, Boolean.TRUE) == null) {
                 Semaphore semki = hostSemaphores.get(URLUtils.getHost(what));
                 semki.acquire();
                 try {
                     Document d = downloader.download(what);
                     success.add(what);
-                    waiter.acquire();
-                    extractorService.submit(() -> {
-                        extractCommand(d, depth);
-                    });
+                    if (depth > 1) {
+                        counter.up();
+                        extractorService.submit(() -> extractCommand(d, depth, counter, success, errors, visited));
+                    }
                 } finally {
                     semki.release();
                 }
@@ -46,58 +79,65 @@ public class WebCrawler implements Crawler {
         } catch (IOException e) {
             errors.put(what, e);
         } catch (InterruptedException e) {
-            e.printStackTrace();
+            //
         } finally {
-            waiter.release();
+            counter.down();
         }
     }
 
-    public void extractCommand(Document doc, int depth) {
+    private void extractCommand(Document doc, int depth, CountLatch counter, List<String> success,
+                                ConcurrentHashMap<String, IOException> errors, ConcurrentHashMap<String, Boolean> visited) {
         try {
-            if(depth > 1) {
-                List<String> list = doc.extractLinks();
-                for (String s : list) {
-                    String host = URLUtils.getHost(s);
-                    hostSemaphores.putIfAbsent(host, new Semaphore(perHost));
-                    waiter.acquire();
-                    downloadService.submit(() -> {
-                        downloadCommand(s, depth - 1);
-                    });
-                }
+            List<String> list = doc.extractLinks();
+            for (String s : list) {
+                String host = URLUtils.getHost(s);
+                hostSemaphores.putIfAbsent(host, new Semaphore(perHost));
+                counter.up();
+                downloadService.submit(() -> downloadCommand(s, depth - 1, counter, success, errors, visited));
             }
-        } catch (IOException | InterruptedException e) {
+        } catch (IOException e) {
             //e.printStackTrace();
         } finally {
-            waiter.release();
+            counter.down();
         }
     }
 
     @Override
     public Result download(String what, int depth) {
+        List<String> success = Collections.synchronizedList(new LinkedList<String>());
+        ConcurrentHashMap<String, IOException> errors = new ConcurrentHashMap<>();
         try {
-            hostSemaphores.put(URLUtils.getHost(what), new Semaphore(perHost));
-            waiter.acquire();
-            downloadService.submit(() -> {
-                downloadCommand(what, depth);
-            });
-            waiter.acquire(MAX_WAITER_COUNT);
-        } catch (InterruptedException e) {
-            //
+            CountLatch counter;
+            synchronized (lock) {
+                if (isClosed) {
+                    throw new InterruptedException();
+                }
+                ConcurrentHashMap<String, Boolean> visited = new ConcurrentHashMap<>();
+                counter = new CountLatch();
+                counters.add(counter);
+                hostSemaphores.put(URLUtils.getHost(what), new Semaphore(perHost));
+                counter.up();
+                downloadService.submit(() -> downloadCommand(what, depth, counter, success, errors, visited));
+            }
+            counter.waitUntilZero();
+        } catch (InterruptedException ignored) {
+
         } catch (MalformedURLException e) {
             e.printStackTrace();
         }
-        closeImpl();//TODO: это нинадо
         return new Result(success, errors);
     }
 
-    public void closeImpl() {
-        downloadService.shutdownNow();
-        extractorService.shutdownNow();
-    }
 
     @Override
     public void close() {
-        waiter.release();
-        closeImpl();
+        synchronized (lock) {
+            downloadService.shutdownNow();
+            extractorService.shutdownNow();
+            for (CountLatch c : counters) {
+                c.finish();
+            }
+            isClosed = true;
+        }
     }
 }
