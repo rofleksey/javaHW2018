@@ -115,7 +115,7 @@ public class WebCrawler implements Crawler {
                 }
                 counter = new CountLatch();
                 counters.add(counter);
-                hostSemaphores.put(URLUtils.getHost(what), new Semaphore(perHost));
+                hostSemaphores.putIfAbsent(URLUtils.getHost(what), new Semaphore(perHost));
                 counter.up();
                 downloadService.submit(() -> downloadCommand(what, depth, counter, success, errors));
             }
