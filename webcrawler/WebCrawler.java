@@ -74,22 +74,27 @@ public class WebCrawler implements Crawler {
             if (visited.putIfAbsent(what, Boolean.TRUE) == null) {
                 Semaphore semki = hostSemaphores.get(URLUtils.getHost(what));
                 semki.acquire();
+                Document d;
                 try {
-                    Document d = downloader.download(what);
-                    success.add(what);
-                    if (depth > 1) {
-                        counter.up();
-                        extractorService.submit(() -> extractCommand(d, what, depth, counter, success, errors, visited, hostSemaphores));
-                    }
+                    d = downloader.download(what);
                 } finally {
                     semki.release();
                 }
+                success.add(what);
+                if (depth > 1) {
+                    counter.up();
+                    extractorService.submit(() -> extractCommand(d, what, depth, counter, success, errors, visited, hostSemaphores));
+                }
+            } else {
+                System.out.println(">>"+what);
             }
         } catch (IOException e) {
             errors.putIfAbsent(what, e);
         } catch (InterruptedException e) {
             //
-        } finally {
+        } catch (Exception e) {
+            e.printStackTrace();
+        }finally {
             counter.down();
         }
     }
@@ -110,6 +115,8 @@ public class WebCrawler implements Crawler {
             }
         } catch (IOException e) {
             errors.putIfAbsent(url, e);
+        } catch (Exception e) {
+            e.printStackTrace();
         } finally {
             counter.down();
         }
@@ -117,6 +124,7 @@ public class WebCrawler implements Crawler {
 
     @Override
     public Result download(String what, int depth) {
+        System.out.println("*START*");
         List<String> success = Collections.synchronizedList(new LinkedList<String>());
         ConcurrentHashMap<String, IOException> errors = new ConcurrentHashMap<>();
         ConcurrentHashMap<String, Boolean> visited = new ConcurrentHashMap<>();
@@ -134,11 +142,17 @@ public class WebCrawler implements Crawler {
                 downloadService.submit(() -> downloadCommand(what, depth, counter, success, errors, visited, hostSemaphores));
             }
             counter.waitUntilZero();
+            synchronized (counters) {///вроде не нужно synchronized
+                counters.remove(counter);
+            }
         } catch (InterruptedException ignored) {
 
         } catch (MalformedURLException e) {
             e.printStackTrace();
         }
+        System.out.println(success);
+        System.out.println(errors);
+        System.out.println("*END*");
         return new Result(success, errors);
     }
 

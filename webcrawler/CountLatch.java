@@ -1,7 +1,7 @@
 package ru.ifmo.rain.borisov.webcrawler;
 
 public class CountLatch {
-    private int count = 0;
+    private long count = 0;
     private boolean finished = false;
 
     public synchronized void waitUntilZero() throws InterruptedException {
