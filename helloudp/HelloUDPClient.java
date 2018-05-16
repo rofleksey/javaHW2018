@@ -1,13 +1,17 @@
 package ru.ifmo.rain.borisov.helloudp;
 
+import info.kgeorgiy.java.advanced.hello.HelloClient;
+import info.kgeorgiy.java.advanced.hello.HelloClientTest;
+
 import java.io.IOException;
 import java.net.*;
 import java.nio.charset.Charset;
+import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-public class HelloUDPClient {
+public class HelloUDPClient implements HelloClient {
     static final int UDP_PACKET_SIZE = 8192;
     static final int UDP_TIMEOUT = 1000;
     ExecutorService[] threads;
@@ -33,60 +37,68 @@ public class HelloUDPClient {
             System.err.println("Can't parse number: " + e.getMessage());
             return;
         }
-        try {
-            HelloUDPClient udp = new HelloUDPClient(address, port, requestPrefix, threadsCount, numberOfRequests);
-            udp.waitFor();
-        } catch (UnknownHostException e) {
-            System.err.println("Unknown host: " + e.getMessage());
-        } catch (SocketException e) {
-            System.err.println("Can't create socket: " + e.getMessage());
-        }
+        HelloUDPClient udp = new HelloUDPClient();
+        udp.run(address, port, requestPrefix, threadsCount, numberOfRequests);
     }
 
-    HelloUDPClient(final String addressString, final int port, final String requestPrefix, final int threadsCount, final int numberOfRequests) throws UnknownHostException, SocketException {
+
+    @Override
+    public void run(String addressString, int port, final String requestPrefix, int threadsCount, int numberOfRequests) {
         threads = new ExecutorService[threadsCount];
         for (int i = 0; i < threadsCount; i++) {
             threads[i] = Executors.newSingleThreadExecutor();
         }
-        InetAddress address = InetAddress.getByName(addressString);
+        InetAddress addressTemp = null;
+        try {
+            addressTemp = InetAddress.getByName(addressString);
+        } catch (UnknownHostException e) {
+            return;
+        }
+        final InetAddress address = addressTemp;
         for (int j = 0; j < threadsCount; j++) {
             ExecutorService threadpool = threads[j];
-            for (int i = 0; i < numberOfRequests; i++) {
-                final int ii = i, jj = j;
-                final DatagramSocket clientSocket = new DatagramSocket();
-                clientSocket.setSoTimeout(UDP_TIMEOUT);
-                threadpool.submit(() -> {
-                    String requestString = requestPrefix + (jj + 1) + "_" + (ii + 1);
+            final int jj = j;
+            threadpool.submit(() -> {
+                for (int i = 0; i < numberOfRequests; i++) {
+                    final DatagramSocket clientSocket;
+                    try {
+                        clientSocket = new DatagramSocket();
+                        clientSocket.setSoTimeout(UDP_TIMEOUT);
+                    } catch (SocketException e) {
+                        return;
+                    }
+                    //System.out.println("!"+requestPrefix+"!");
+                    String requestString = requestPrefix+jj + "_" + i;
                     byte[] request = requestString.getBytes(Charset.forName("UTF-8"));
                     byte[] response = new byte[UDP_PACKET_SIZE];//TODO: сервер может отправить ответ больше ожидаемого, тогда прийдет не все
-                    DatagramPacket sendPacket = new DatagramPacket(request, request.length, address, port);
-                    DatagramPacket receivePacket = new DatagramPacket(response, response.length);
-                    System.out.println(requestString);
-                    while (true) {//TODO: на вход может быть передана слишком большая для UDP строка, и может в итоге отправиться не все
+                    //System.out.println(requestString);
+                    for(int attempts = 0; attempts < 10; attempts++) {//TODO: на вход может быть передана слишком большая для UDP строка, и может в итоге отправиться не все
                         try {
+                            DatagramPacket sendPacket = new DatagramPacket(request, request.length, address, port);
+                            DatagramPacket receivePacket = new DatagramPacket(response, response.length);
                             clientSocket.send(sendPacket);
                             clientSocket.receive(receivePacket);
-                            System.out.println(new String(response, 0, receivePacket.getLength(), "UTF-8"));
+                            String input = new String(response, 0, receivePacket.getLength(), "UTF-8");
+                            if(!input.contains(requestString)) {
+                                //System.out.println(input+"!!!!!!!!!!!");
+                                continue;
+                            }
+                            System.out.println(input);
                         } catch (IOException e) {
                             continue;
                         }
                         break;
                     }
-                });
-            }
+                }
+            });
         }
-    }
-
-    void waitFor() {
-        for (int i = 0; i < threads.length; i++) {
-            threads[i].shutdown();
-        }
-        for (int i = 0; i < threads.length; i++) {
+        Arrays.stream(threads).forEach(ExecutorService::shutdownNow);
+        Arrays.stream(threads).forEach(it -> {
             try {
-                threads[i].awaitTermination(1, TimeUnit.DAYS);
+                it.awaitTermination(60, TimeUnit.SECONDS);
             } catch (InterruptedException e) {
                 //
             }
-        }
+        });
     }
 }

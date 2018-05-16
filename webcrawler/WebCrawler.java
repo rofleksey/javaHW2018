@@ -69,30 +69,19 @@ public class WebCrawler implements Crawler {
     }
 
     private void downloadCommand(String what, int depth, CountLatch counter, List<String> success,
-                                 ConcurrentHashMap<String, IOException> errors, ConcurrentHashMap<String, Boolean> visited, ConcurrentHashMap<String, Semaphore> hostSemaphores) {
+                                 ConcurrentHashMap<String, IOException> errors, ConcurrentHashMap<String, Boolean> visited) {
         try {
             if (visited.putIfAbsent(what, Boolean.TRUE) == null) {
-                Semaphore semki = hostSemaphores.get(URLUtils.getHost(what));
-                semki.acquire();
-                Document d;
-                try {
-                    d = downloader.download(what);
-                } finally {
-                    semki.release();
-                }
+                Document d = downloader.download(what);
                 success.add(what);
                 if (depth > 1) {
                     counter.up();
-                    extractorService.submit(() -> extractCommand(d, what, depth, counter, success, errors, visited, hostSemaphores));
+                    extractorService.submit(() -> extractCommand(d, what, depth, counter, success, errors, visited));
                 }
-            } else {
-                System.out.println(">>"+what);
             }
         } catch (IOException e) {
             errors.putIfAbsent(what, e);
-        } catch (InterruptedException e) {
-            //
-        } catch (Exception e) {
+        }catch (Exception e) {
             e.printStackTrace();
         }finally {
             counter.down();
@@ -100,15 +89,14 @@ public class WebCrawler implements Crawler {
     }
 
     private void extractCommand(Document doc, String url, int depth, CountLatch counter, List<String> success,
-                                ConcurrentHashMap<String, IOException> errors, ConcurrentHashMap<String, Boolean> visited, ConcurrentHashMap<String, Semaphore> hostSemaphores) {
+                                ConcurrentHashMap<String, IOException> errors, ConcurrentHashMap<String, Boolean> visited) {
         try {
             List<String> list = doc.extractLinks();
             for (String s : list) {
                 try {
                     String host = URLUtils.getHost(s);
-                    hostSemaphores.putIfAbsent(host, new Semaphore(perHost));
                     counter.up();
-                    downloadService.submit(() -> downloadCommand(s, depth - 1, counter, success, errors, visited, hostSemaphores));
+                    downloadService.submit(() -> downloadCommand(s, depth - 1, counter, success, errors, visited));
                 } catch (MalformedURLException ee) {
                     errors.putIfAbsent(s, ee);
                 }
@@ -124,11 +112,10 @@ public class WebCrawler implements Crawler {
 
     @Override
     public Result download(String what, int depth) {
-        System.out.println("*START*");
+        //System.out.println("*START*");
         List<String> success = Collections.synchronizedList(new LinkedList<String>());
         ConcurrentHashMap<String, IOException> errors = new ConcurrentHashMap<>();
         ConcurrentHashMap<String, Boolean> visited = new ConcurrentHashMap<>();
-        ConcurrentHashMap<String, Semaphore> hostSemaphores = new ConcurrentHashMap<>();
         try {
             CountLatch counter;
             synchronized (lock) {
@@ -137,9 +124,8 @@ public class WebCrawler implements Crawler {
                 }
                 counter = new CountLatch();
                 counters.add(counter);
-                hostSemaphores.putIfAbsent(URLUtils.getHost(what), new Semaphore(perHost));
                 counter.up();
-                downloadService.submit(() -> downloadCommand(what, depth, counter, success, errors, visited, hostSemaphores));
+                downloadService.submit(() -> downloadCommand(what, depth, counter, success, errors, visited));
             }
             counter.waitUntilZero();
             synchronized (counters) {///вроде не нужно synchronized
@@ -147,12 +133,10 @@ public class WebCrawler implements Crawler {
             }
         } catch (InterruptedException ignored) {
 
-        } catch (MalformedURLException e) {
-            e.printStackTrace();
         }
-        System.out.println(success);
-        System.out.println(errors);
-        System.out.println("*END*");
+        //System.out.println(success);
+        //System.out.println(errors);
+        //System.out.println("*END*");
         return new Result(success, errors);
     }
 
